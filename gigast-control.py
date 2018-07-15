@@ -21,6 +21,8 @@ import sys
 import os
 import wx
 
+from argparse import ArgumentParser
+
 from pubsub import pub
 from struct import pack, unpack
 from serial import Serial
@@ -73,6 +75,8 @@ def hack_wx():
 class ConfigPanel(wx.Panel):
     def __init__(self, *args, **kw):
         wx.Panel.__init__(self, *args, **kw)
+
+        self.scan_timer = None
 
         sz = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(sz)
@@ -127,11 +131,23 @@ class ConfigPanel(wx.Panel):
         self.cf_delay = wx.ComboBox(self, -1, "100")
         sz.Add(self.cf_delay, flag=wx.GROW)
 
-        bt_run = wx.Button(self, -1, "RUN", size=(300,200))
-        bt_run.Bind(wx.EVT_BUTTON, self.do_run)
-        sz.Add(bt_run, flag=wx.ALIGN_CENTER)
+        self.bt_run = wx.Button(self, -1, "RUN", size=(300,200))
+        self.bt_run.Bind(wx.EVT_BUTTON, self.do_run)
+        sz.Add(self.bt_run, flag=wx.ALIGN_CENTER)
 
     def do_run(self, event):
+        if self.scan_timer:
+            self.scan_timer.Stop()
+            self.scan_timer = None
+            self.Bind(wx.EVT_TIMER, None)
+            self.bt_run.SetLabel("RUN")
+        else:
+            self.scan_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self.do_scan)
+            self.scan_timer.Start(1000)
+            self.bt_run.SetLabel("STOP")
+ 
+    def do_scan(self, ev):
         cmd = GS4_CMD()
         cmd.START   = int(int(self.cf_start.GetValue()) / 20)
         cmd.STEP    = int(int(self.cf_step.GetValue()) / 20)
@@ -170,11 +186,32 @@ class PlotPanel(wx.Panel):
         sizer.Add(self.canvas, flag=wx.EXPAND, proportion=1)
         self.SetSizer(sizer)
 
+        self.Bind(wx.EVT_CHAR_HOOK, self.on_key)
+
         # subscribe to various redraw events
         pub.subscribe(self.plot_sp, 'plot_sp')
 
         # draw initial plot
         self.redraw()
+
+    def on_key(self, ev):
+         if ev.GetKeyCode() == wx.WXK_UP:
+             pub.sendMessage("freq_zoom_out")
+             return
+
+         if ev.GetKeyCode() == wx.WXK_DOWN:
+             pub.sendMessage("freq_zoom_in")
+             return
+
+         if ev.GetKeyCode() == wx.WXK_LEFT:
+             pub.sendMessage("freq_move_up")
+             return
+
+         if ev.GetKeyCode() == wx.WXK_RIGHT:
+             pub.sendMessage("freq_move_down")
+             return
+
+         ev.Skip()
 
     def redraw(self):
         self.axes.clear()
@@ -194,6 +231,9 @@ class PlotPanel(wx.Panel):
             dbm = 10 - 10230 / md.sp_data
 
             self.axes.plot(f_range, dbm)
+            #self.axes.set_xlim(md.xrange)
+            self.axes.set_ylim(md.yrange)
+            self.axes.grid(True)
         else:
             self.axes.plot([1, 2, 3], [4, 5, 6], 'ro-', picker=5)
         self.canvas.draw()
@@ -235,12 +275,13 @@ class MyFrame(wx.Frame):
         lr.SplitVertically(self.pa_config, self.pa_plot, 150)
 
 class MyApp(wx.App):
-    def __init__(self, *args, **kw):
+    def __init__(self, ctx, *args, **kw):
         wx.App.__init__(self, *args, **kw)
         top = MyFrame(title="GigaSt Control", size=(800, 600))
         top.Center()
         top.Show()
 
+        self.ctx = ctx
         self.top = top
         self.ctl = AppControl(top)
 
@@ -294,6 +335,10 @@ class AppModel(object):
         self.tg_data = None
         self.tg_peak = None
 
+        # plot view configuration
+        self.xrange = (0, 10e6)
+        self.yrange = (-70.0, 0.0)
+
 class AppControl(object):
     def __init__(self, top):
         self.top = top
@@ -334,7 +379,20 @@ class AppControl(object):
         self.model.sp_peak = peak_ex << 16 | peak_hi << 8 | peak_lo
 
 if __name__ == '__main__' and '__file__' in globals():
-    logging.basicConfig(level=logging.DEBUG)
-    app = MyApp()
-    app.MainLoop = app.MainLoopDebug
+    ap = ArgumentParser()
+    ap.add_argument('-D', '--debug', default='INFO')
+    ap.add_argument('-J', '--jupyter', action='store_true')
+    ap.add_argument('args', nargs='*')
+    
+    # parse args
+    ctx = lambda:0
+    ctx.opt = ap.parse_args()
+
+    # setup logger
+    logging.basicConfig(level=eval('logging.' + ctx.opt.debug))
+
+    app = MyApp(ctx)
+
+    if ctx.opt.jupyter:
+        app.MainLoop = app.MainLoopDebug
     app.MainLoop()
